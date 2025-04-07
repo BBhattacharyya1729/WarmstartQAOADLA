@@ -1,0 +1,355 @@
+from qiskit.quantum_info import SparsePauliOp
+from WarmStartUtils import *
+import numpy as np
+from functools import reduce
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from tqdm import tqdm
+from tqdm.contrib import itertools
+from tqdm.notebook import tqdm
+
+"""
+Hamiltonian from adjacency matrix A
+"""
+def indexedZ(i,n):
+    """
+    Returns a SparsePauli Op corresponding to a Z operator on a single qubit
+
+    Parameters:
+        i (int): qubit index 
+        n (int): number of qubits
+
+    Returns:
+        SparsePauliOp: SparsePauli for single Z operator
+    """
+    
+    return SparsePauliOp("I" * (n-i-1) + "Z" + "I" * i)
+
+def getHamiltonian(A):
+    """
+    Gets a Hamiltonian from a max-cut adjacency matrix
+
+    Parameters:
+        A (np.ndarray): max-cut adjacency matrix
+
+    Returns:
+        SparsePauliOp: Hamiltonian 
+    """
+    
+    n = len(A)
+    H = 0 * SparsePauliOp("I" * n)
+    for i in range(n):
+        for j in range(n):
+            H -= 1/4 * A[i][j] * indexedZ(i,n) @ indexedZ(j,n)
+    return H.simplify()
+
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+def SU2_op(x,y,z,t):
+    """
+    Get the matrix for a SU2 rotation around an axis 
+
+    Parameters:
+        x (float): x-coordinate of rotation axis
+        y (float): y-coordinate of rotation axis
+        z (float): z-coordinate of rotation axis
+        t (float): rotation angle
+
+    Returns:
+        np.ndarray: matrix for the SU2 rotation
+    """
+    
+    return np.array([[np.cos(t)-1j * np.sin(t)*z, -np.sin(t) * (y+1j * x)],[ -np.sin(t) * (-y+1j * x),np.cos(t)+1j * np.sin(t)*z]])
+
+def apply_single_qubit_op(psi,U,q):
+    """
+    Efficiently apply a single qubit operator U on qubit q to statevector psi
+
+    Parameters:
+        psi (np.ndarray): Statevector
+        U (np.ndarray): Operator 
+        q (int): qubit index 
+
+    Returns:
+        np.ndarray: New Statevector 
+    """
+    
+    n=int(np.log2(len(psi)))
+    axes = [q] + [i for i in range(n) if i != q]
+    contract_shape = (2, len(psi)// 2)
+    tensor = np.transpose(
+        np.reshape(psi, tuple(2 for i in range(n))),
+        axes,
+    )
+    tensor_shape = tensor.shape
+    tensor = np.reshape(
+        np.dot(U, np.reshape(tensor, contract_shape)),
+        tensor_shape,
+    )
+    return np.reshape(np.transpose(tensor, np.argsort(axes)),len(psi))
+
+def pre_compute(A):
+    """
+    Pre-compute the diagonal elements of Hamiltonian corresponding to max-cut adjacency matrix
+
+    Parameters:
+        A (np.ndarray): adjacency matrix
+
+    Returns:
+        np.ndarray: Array containing matrix diagonal  
+    """
+    
+    return np.array(scipy.sparse.csr_matrix.diagonal(getHamiltonian(np.flip(A)).to_matrix(sparse=True))).real
+
+def apply_mixer(psi,U_ops):
+    """
+    Apply mixer layer to state
+    
+    Parameters:
+        psi (np.ndarray): Original state vector
+        U_op (list[np.ndarray]): list of mixer operators
+
+    Returns:
+        psi (np.ndarray): New statevector  
+    """
+    
+    for n in range(0,len(U_ops)):
+        psi = apply_single_qubit_op(psi, U_ops[n], n)
+    return psi
+
+def cost_layer(precomp,psi,t):
+    """
+    Given a precomputed Hamiltonian diagonal, apply the cost layer
+
+    Parameters:
+        precomp (np.ndarray): Precompute diagonal
+        psi (np.ndarray): Statevector
+        t (float): Rotation angle
+
+    Returns:
+        np.ndarray: New statevector
+    """
+    
+    return np.exp(-1j * precomp*t) * psi
+
+def QAOA_eval(precomp,params,mixer_ops=None,init=None):
+    """"
+    Returns statevector after applying QAOA circuit
+
+    Parameters:
+        precomp (np.ndarray): Hamiltonian diagonal
+        params (np.ndarray): Array of QAOA circuit parameters
+        mixer_ops (list[np.ndarray]): list of mixer parameters
+        init (np.ndarray): initial state 
+
+    Returns:
+        psi (np.ndarray): new statevector
+    """
+    
+    p = len(params)//2
+    gammas = params[p:]
+    betas = params[:p]
+    
+    psi = np.zeros(len(precomp),dtype='complex128')
+    if(init is None):
+        psi = np.ones(len(psi),dtype='complex128') *  1/np.sqrt(len(psi))
+    else:
+        psi = init
+
+    if(mixer_ops is None):
+        mixer = lambda t: [SU2_op(1,0,0,t) for m in range(int(np.log2(len(psi))))]
+    else:
+        mixer = mixer_ops
+    
+    for i in range(p):
+        psi = cost_layer(precomp,psi,gammas[i])
+        psi = apply_mixer(psi,mixer(betas[i]))
+    return psi
+
+def expval(precomp,psi):
+    """"
+    Compute the expectation value of a diagonal hamiltonian on a state
+
+    Parameters:
+        precomp (np.ndarray): Diagonal elements of Hamiltonian 
+        psi (np.ndarray): Statevector 
+
+    Returns:
+        float: expectation value 
+    """
+    
+    return np.sum(psi.conjugate() * precomp * psi).real
+
+def Q2_data(theta_list,rotation=None):
+    """"
+    Get warmstart data from polar angles
+
+    Parameters:
+        theta_list (np.ndarray): A 2D array of angles in polar (2D) coordinates.
+        rotation (int): The index of the vertex to move to the top, defaults to None.
+
+    Returns:
+        tuple:
+            init (np.ndarray): The initial statevector
+            mixer_ops (list[np.ndarray]): the mixer operators 
+    """
+    
+    angles = vertex_on_top(theta_list,rotation)
+    init = reduce(lambda a,b: np.kron(a,b), [np.array([np.cos(v/2), np.exp(-1j/2 * np.pi)*np.sin(v/2)],dtype='complex128') for v in angles])
+    mixer_ops = lambda t: [  SU2_op(0,-np.sin(v),np.cos(v),t) for v in angles]
+    return init,mixer_ops
+
+def Q3_data(theta_list,rotation=None,z_rot=0):
+    """"
+    Get warmstart data from spherical angles
+
+    Parameters:
+        theta_list (np.ndarray): A 2D array of angles in spherical (3D) coordinates.
+        rotation (int): The index of the vertex to move to the top, defaults to None.
+
+    Returns:
+        tuple:
+            init (np.ndarray): The initial statevector
+            mixer_ops (list[np.ndarray]): the mixer operators 
+    """
+    angles = vertex_on_top(theta_list,rotation,z_rot=z_rot)
+    init = reduce(lambda a,b: np.kron(a,b), [np.array([np.cos(v[0]/2), np.exp(1j * v[1])*np.sin(v[0]/2)],dtype='complex128') for v in angles])
+    mixer_ops = lambda t:  [SU2_op(np.sin(v[0])*np.cos(v[1]),np.sin(v[0])*np.sin(v[1]),np.cos(v[0]),t) for v in angles]
+    return init,mixer_ops
+
+X = np.array([[0,1],[1,0]],dtype=complex)
+Y = np.array([[0,-1j],[1j,0]],dtype=complex)
+Z = np.array([[1,0],[0,-1]],dtype=complex)
+
+def Q2_Hamiltonian(angles):
+    
+    GW2_HB = np.zeros((2**len(angles),2**len(angles)),dtype=complex)
+    for i,t in enumerate(angles):
+        op = -np.sin(t) * Y + np.cos(t)* Z
+        l = [np.eye(2) for i in range(len(angles))]
+        l[i] = op 
+        GW2_HB+=reduce(lambda a,b: np.kron(a,b),l)
+    
+    return GW2_HB
+
+def Q3_Hamiltonian(angles):
+    
+    GW3_HB = np.zeros((2**len(angles),2**len(angles)),dtype=complex)
+    for i,t in enumerate(angles):
+        op = np.sin(t[0])*np.cos(t[1]) * X + np.sin(t[0])*np.sin(t[1]) * Y  + np.cos(t[0]) * Z
+        l = [np.eye(2) for i in range(len(angles))]
+        l[i] = op 
+        GW3_HB+=reduce(lambda a,b: np.kron(a,b),l)
+    
+    return GW3_HB
+
+def default_Hamiltonian(n):
+    
+    HB = np.zeros((2**(n),2**(n)),dtype=complex)
+    for i in range(n):
+        op = X
+        l = [np.eye(2) for i in range(n)]
+        l[i] = op 
+        HB+=reduce(lambda a,b: np.kron(a,b),l)
+    
+    return HB
+
+def mixer_derivative(mixer_ops):
+    out  = []
+    def derive(t):
+        m_plus  = mixer_ops(t+np.pi/2)
+        m_minus  = mixer_ops(t-np.pi/2)
+        return [(p-m)/2 for (p,m) in zip(m_plus,m_minus)]
+    for i in range(len(mixer_ops(0))):
+        out.append(lambda t,idx=i: [mixer_ops(t)[j] if j!=idx else derive(t)[idx] for j in range(len(mixer_ops(0)))]) 
+        
+    return out
+
+def beta_QAOA_state_derivative(idx,precomp,params,mixer_ops=None,init=None):
+    
+    p = len(params)//2
+    gammas = params[p:]
+    betas = params[:p]
+    
+    psi = np.zeros(len(precomp),dtype='complex128')
+    if(init is None):
+        psi = np.ones(len(psi),dtype='complex128') *  1/np.sqrt(len(psi))
+    else:
+        psi = init
+
+
+    if(mixer_ops is None):
+        mixer = lambda t: [SU2_op(1,0,0,t) for m in range(int(np.log2(len(psi))))]
+    else:
+        mixer = mixer_ops
+        
+    
+    d_psi = np.array([psi for i in range(len(mixer(0)))])
+    
+    mixer_derivative_ops = mixer_derivative(mixer)
+    
+    for i in range(p):
+        for _ in range(len(d_psi)):
+            d_psi[_] = cost_layer(precomp,d_psi[_],gammas[i])
+        if(i!=idx):
+            for _ in range(len(d_psi)):
+                d_psi[_] = apply_mixer(d_psi[_],mixer(betas[i]))
+        else:
+            for _ in range(len(d_psi)):
+                d_psi[_] = apply_mixer(d_psi[_],mixer_derivative_ops[_](betas[i]))
+    return np.sum(d_psi,axis=0)
+
+
+
+def gamma_QAOA_state_derivative(idx,precomp,params,mixer_ops=None,init=None):
+    
+    p = len(params)//2
+    gammas = params[p:]
+    betas = params[:p]
+    
+    psi = np.zeros(len(precomp),dtype='complex128')
+    if(init is None):
+        psi = np.ones(len(psi),dtype='complex128') *  1/np.sqrt(len(psi))
+    else:
+        psi = init
+
+
+    if(mixer_ops is None):
+        mixer = lambda t: [SU2_op(1,0,0,t) for m in range(int(np.log2(len(psi))))]
+    else:
+        mixer = mixer_ops
+        
+
+    for i in range(p):
+        psi = cost_layer(precomp,psi,gammas[i])
+        if(i == idx):
+            psi = (-1j * precomp) * psi
+        psi = apply_mixer(psi,mixer(betas[i]))
+    return psi
+
+def QAOA_gradient_eval(precomp,params,mixer_ops=None,init=None):
+    psi = QAOA_eval(precomp,params,mixer_ops=mixer_ops,init=init)
+    grads = []
+    for i in range(len(params)//2):
+        dpsi = beta_QAOA_state_derivative(i,precomp,params,mixer_ops=mixer_ops,init=init)
+        grads.append(2 * np.sum(dpsi.conjugate() * precomp * psi).real)
+    
+    for i in range(len(params)//2):
+        dpsi = gamma_QAOA_state_derivative(i,precomp,params,mixer_ops=mixer_ops,init=init)
+        grads.append(2 * np.sum(dpsi.conjugate() * precomp * psi).real)
+        
+    return np.array(grads)
+
+def variance_sample(f,n_params,shots=100):
+    data = []
+    for i in tqdm(range(shots)):
+        data.append((f(np.random.random(n_params) * 2 * np.pi)))
+    return np.mean(np.var(data,axis=0))
+
+def QAOA_variance_sample(precomp,p,mixer_ops=None,init=None,shots=100):
+    f = lambda params : QAOA_gradient_eval(precomp,params,mixer_ops=mixer_ops,init=init)
+    return variance_sample(f,2*p,shots=shots)    
+
+def expm(A):
+    vals,vecs  = np.linalg.eig(A)
+    return vecs @ np.diag(np.exp(vals)) @ np.linalg.inv(vecs)
