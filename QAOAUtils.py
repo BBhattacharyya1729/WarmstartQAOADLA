@@ -9,6 +9,8 @@ from tqdm.contrib import itertools
 from tqdm.notebook import tqdm
 from joblib import Parallel, delayed
 from tqdm_joblib import tqdm_joblib
+import pickle
+import os
 
 """
 Hamiltonian from adjacency matrix A
@@ -375,17 +377,38 @@ def beta_variance_sample(precomp,p,mixer_ops=None,init=None,shots=100):
     grad = lambda params: 2 * np.sum(f(params).conjugate() * precomp * psi(params)).real
     return variance_sample(grad, 2*p,shots=shots)
 
+def all_beta_variance_run(precomp, GW2_circ_data, GW3_circ_data):
+    pickle_file = 'beta_variance_runs.pkl'
+    
+    if os.path.exists(pickle_file):
+        with open(pickle_file, 'rb') as f:
+            all_runs = pickle.load(f)
+    else:
+        all_runs = []
+    
+    beta_vars_default = variance_depth(beta_variance_sample, precomp, shots=1000)
+    beta_vars_GW2 = variance_depth(beta_variance_sample, precomp, mixer_ops=GW2_circ_data[1], init=GW2_circ_data[0], shots=1000)
+    beta_vars_GW3 = variance_depth(beta_variance_sample, precomp, mixer_ops=GW3_circ_data[1], init=GW3_circ_data[0], shots=1000)
+    
+    all_runs.append({
+        'beta_vars_default': beta_vars_default,
+        'beta_vars_GW2': beta_vars_GW2,
+        'beta_vars_GW3': beta_vars_GW3
+    })
+    
+    with open(pickle_file, 'wb') as f:
+        pickle.dump(all_runs, f)
+
 def expm(A):
     vals,vecs  = np.linalg.eig(A)
     return vecs @ np.diag(np.exp(vals)) @ np.linalg.inv(vecs)
 
 def variance_depth(variance_sample, precomp, initial_p=10, max_p=210, step_size=10,mixer_ops=None, init=None, shots=100):
     vars = []
-    for i in tqdm(range(initial_p, max_p, step_size)):
+    for i in tqdm(range(initial_p, max_p, step_size), "Individual Progress"):
         p = i
         var = variance_sample(precomp,p,mixer_ops,init,shots)
         vars.append(var)
-        print(f"Depth: {p}, {var}")
     return vars
 
 def variance_plot(name, vars, initial_p=10, max_p=210, step_size=10):
