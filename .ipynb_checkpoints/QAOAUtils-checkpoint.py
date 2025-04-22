@@ -350,7 +350,7 @@ def QAOA_gradient_eval(precomp,params,mixer_ops=None,init=None):
 #         data.append((f(np.random.random(n_params) * 2 * np.pi)))
 #     return np.mean(np.var(data,axis=0))
 
-# Paralell Variance
+# Parallel Variance
 
 def variance_sample(f, n_params, shots=100, n_jobs=-1, tqdm_enabled=False):
     param_list = [np.random.random(n_params) * 2 * np.pi for _ in range(shots)]
@@ -377,7 +377,7 @@ def beta_variance_sample(precomp,p,mixer_ops=None,init=None,shots=100):
     grad = lambda params: 2 * np.sum(f(params).conjugate() * precomp * psi(params)).real
     return variance_sample(grad, 2*p,shots=shots)
 
-def all_beta_variance_run(precomp, GW2_circ_data, GW3_circ_data):
+def all_beta_variance_run(precomp, GW2_circ_data, GW3_circ_data, A, GW2_angles, GW3_angles):
     pickle_file = 'beta_variance_runs.pkl'
     
     if os.path.exists(pickle_file):
@@ -393,11 +393,31 @@ def all_beta_variance_run(precomp, GW2_circ_data, GW3_circ_data):
     all_runs.append({
         'beta_vars_default': beta_vars_default,
         'beta_vars_GW2': beta_vars_GW2,
-        'beta_vars_GW3': beta_vars_GW3
+        'beta_vars_GW3': beta_vars_GW3,
+        "A": A,
+        "GW2_angles" : GW2_angles,
+        "GW3_angles": GW3_angles
     })
     
     with open(pickle_file, 'wb') as f:
         pickle.dump(all_runs, f)
+
+def beta_variance_run_loop(iterations=10):
+    for _ in tqdm(range(iterations), "Overall Progress"):
+        n = 8
+        A= rand_adj(n)
+        
+        Y = GW(A)  ###calculate the full GW embedding
+        _,GW2_angles,_ = GW2(A,GW_Y=Y) ###project to 2d angles using precalculated GW embedding 
+        _,GW3_angles,_ = GW3(A,GW_Y=Y) ###project to 2d angles using precalculated GW embedding 
+        
+        ###Get circuit information for each warmstart. Circuit information consists of the initial state + the mixer operators for each qubit
+        GW2_circ_data = Q2_data(GW2_angles,rotation = 0)
+        GW3_circ_data = Q3_data(GW3_angles,rotation = 0)
+    
+        precomp  = pre_compute(A) ###compute the Hamiltonian information for the cost layers (shared for all circuits)
+    
+        all_beta_variance_run(precomp, GW2_circ_data, GW3_circ_data, A, GW2_angles, GW3_angles)
 
 def expm(A):
     vals,vecs  = np.linalg.eig(A)
@@ -411,15 +431,49 @@ def variance_depth(variance_sample, precomp, initial_p=10, max_p=210, step_size=
         vars.append(var)
     return vars
 
-def variance_plot(name, vars, initial_p=10, max_p=210, step_size=10):
+def variance_plot(name, vars1, vars2, vars3, initial_p=10, max_p=210, step_size=10):
     p_values = list(range(initial_p, max_p, step_size))
 
     plt.figure(figsize=(10, 4))
-    plt.plot(p_values, vars, marker='o', linestyle='None')
+    
+    # Plot all three with different styles
+    plt.plot(p_values, vars1, 'o-', label='Default')
+    plt.plot(p_values, vars2, 's--', label='GW2')
+    plt.plot(p_values, vars3, '^-', label='GW3')
+    
     plt.xlabel("p")
     plt.ylabel("Variance (log scale)")
     plt.title(name + " Variance vs Depth")
     plt.yscale("log")
     plt.grid(True)
+    plt.legend()
     plt.tight_layout()
     plt.show()
+
+def all_variance_plot_together(name, runs, initial_p=10, max_p=210, step_size=10):
+    plt.figure(figsize=(12, 4))
+    a = 0.4
+
+    p_values = list(range(initial_p, max_p, step_size))
+    
+    for d in runs:
+        plt.scatter(p_values, d['beta_vars_default'],color = "b", label='default', alpha=a)
+        plt.scatter(p_values, d['beta_vars_GW2'], color = "r", label='GW2', alpha=a)
+        plt.scatter(p_values, d['beta_vars_GW3'], color = "g", label='GW3', alpha=a)
+    
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys(), loc="upper right")
+    
+    plt.xlabel("Depth")
+    plt.ylabel("Variance (log)")
+    plt.yscale("log")
+    plt.title("All Runs Variance vs Depth")
+    plt.show()
+
+def all_variance_plot_separate(name, runs, initial_p=10, max_p=210, step_size=10):
+    for m in range(len(runs)):
+        vars1 =  runs[m]["beta_vars_default"]
+        vars2 = runs[m]["beta_vars_GW2"]
+        vars3 = runs[m]["beta_vars_GW3"]
+        variance_plot("", vars1 ,vars2, vars3)
