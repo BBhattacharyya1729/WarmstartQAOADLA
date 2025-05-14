@@ -11,6 +11,9 @@ from joblib import Parallel, delayed
 from tqdm_joblib import tqdm_joblib
 import pickle
 import os
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial.transform import Rotation as R
+import networkx as nx
 
 """
 Hamiltonian from adjacency matrix A
@@ -431,24 +434,20 @@ def variance_depth(variance_sample, precomp, initial_p=10, max_p=210, step_size=
         vars.append(var)
     return vars
 
-def variance_plot(name, vars1, vars2, vars3, initial_p=10, max_p=210, step_size=10):
+def variance_plot(name, vars1, vars2, vars3, ax, initial_p=10, max_p=210, step_size=10):
     p_values = list(range(initial_p, max_p, step_size))
-
-    plt.figure(figsize=(10, 4))
     
-    # Plot all three with different styles
-    plt.plot(p_values, vars1, 'o-', label='Default')
-    plt.plot(p_values, vars2, 's--', label='GW2')
-    plt.plot(p_values, vars3, '^-', label='GW3')
+    # Plot on the provided axis
+    ax.plot(p_values, vars1, 'o-', label='Default')
+    ax.plot(p_values, vars2, 's--', label='GW2')
+    ax.plot(p_values, vars3, '^-', label='GW3')
     
-    plt.xlabel("p")
-    plt.ylabel("Variance (log scale)")
-    plt.title(name + " Variance vs Depth")
-    plt.yscale("log")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    ax.set_xlabel("p")
+    ax.set_ylabel("Variance (log scale)")
+    ax.set_title(name + " Variance vs Depth")
+    ax.set_yscale("log")
+    ax.grid(True)
+    ax.legend()
 
 def all_variance_plot_together(name, runs, initial_p=10, max_p=210, step_size=10):
     plt.figure(figsize=(12, 4))
@@ -472,8 +471,234 @@ def all_variance_plot_together(name, runs, initial_p=10, max_p=210, step_size=10
     plt.show()
 
 def all_variance_plot_separate(name, runs, initial_p=10, max_p=210, step_size=10):
-    for m in range(len(runs)):
-        vars1 =  runs[m]["beta_vars_default"]
+    num_runs = len(runs)
+    ncols = 6
+    nrows = (num_runs + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    axes = axes.flatten()
+
+    for m in range(num_runs):
+        vars1 = runs[m]["beta_vars_default"]
         vars2 = runs[m]["beta_vars_GW2"]
         vars3 = runs[m]["beta_vars_GW3"]
-        variance_plot("", vars1 ,vars2, vars3)
+        title = f'Run {m+1}'
+        variance_plot(title, vars1, vars2, vars3, axes[m], initial_p, max_p, step_size)
+
+    # Hide unused subplots
+    for j in range(num_runs, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    plt.show()
+
+"""__________________________________________Must Sort Into Categories Later ____________________________________________ """
+
+def new_lst(runs, lst):
+    new_lst = []
+    for p in lst:
+        new_lst.append(runs[p])
+    return new_lst
+
+def GW_angles_2d(runs, title):
+    num_runs = len(runs)
+    ncols = 3
+    nrows = (num_runs + ncols - 1) // ncols  # ceil division
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
+    axes = axes.flatten()
+
+    for i, r in enumerate(runs):
+        angles = np.array(r["GW2_angles"])
+
+        # Calculate rotation to place vertex 0 at the top (pi/2)
+        rotation = np.pi / 2 - angles[0]
+        rotated_angles = (angles + rotation) % (2 * np.pi)
+
+        radius = 1
+        x = radius * np.cos(rotated_angles)
+        y = radius * np.sin(rotated_angles)
+
+        circle_angles = np.linspace(0, 2 * np.pi, 200)
+        circle_x = radius * np.cos(circle_angles)
+        circle_y = radius * np.sin(circle_angles)
+
+        ax = axes[i]
+        ax.plot(circle_x, circle_y, 'k--', label='Unit Circle')
+        ax.plot(x, y, 'o', label='Rotated Points')
+
+        ax.set_aspect('equal')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.grid(True)
+
+        margin = 0.2
+        ax.set_xlim(-radius - margin, radius + margin)
+        ax.set_ylim(-radius - margin, radius + margin)
+
+    for j in range(len(runs), len(axes)):
+        fig.delaxes(axes[j])
+
+    fig.suptitle(title + "\n", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    plt.tight_layout()
+    plt.show()
+
+def variance_plot(name, vars1, vars2, vars3, ax, initial_p=10, max_p=210, step_size=10):
+    p_values = list(range(initial_p, max_p, step_size))
+    
+    # Plot on the provided axis
+    ax.plot(p_values, vars1, 'o-', label='Default')
+    ax.plot(p_values, vars2, 's--', label='GW2')
+    ax.plot(p_values, vars3, '^-', label='GW3')
+    
+    ax.set_xlabel("p")
+    ax.set_ylabel("Variance (log scale)")
+    ax.set_title(name + " Variance vs Depth")
+    ax.set_yscale("log")
+    ax.grid(True)
+    ax.legend()
+    
+def all_variance_plot_separate(name, runs, initial_p=10, max_p=210, step_size=10):
+    num_runs = len(runs)
+    ncols = 6
+    nrows = (num_runs + ncols - 1) // ncols
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    axes = axes.flatten()
+
+    for m in range(num_runs):
+        vars1 = runs[m]["beta_vars_default"]
+        vars2 = runs[m]["beta_vars_GW2"]
+        vars3 = runs[m]["beta_vars_GW3"]
+        title = f'Run {m+1}'
+        variance_plot(title, vars1, vars2, vars3, axes[m], initial_p, max_p, step_size)
+
+    # Hide unused subplots
+    for j in range(num_runs, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    plt.show()
+
+import matplotlib.pyplot as plt
+import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.spatial.transform import Rotation as R
+
+def GW_angles_3d(runs, title):
+    num_runs = len(runs)
+    ncols = 3
+    nrows = (num_runs + ncols - 1) // ncols
+
+    fig = plt.figure(figsize=(6 * ncols, 6 * nrows))
+
+    for i, r in enumerate(runs):
+        angles = r["GW3_angles"]  # Each angle is [polar, azimuthal]
+        radius = 1
+
+        # Convert spherical to Cartesian
+        cartesian = np.array([
+            [
+                radius * np.sin(polar) * np.cos(azim),
+                radius * np.sin(polar) * np.sin(azim),
+                radius * np.cos(polar)
+            ]
+            for polar, azim in angles
+        ])
+
+        # Compute rotation to bring first vertex to north pole
+        v0 = cartesian[0]
+        v0_norm = v0 / np.linalg.norm(v0)
+        north_pole = np.array([0, 0, 1])
+
+        # Axis of rotation = cross product; angle = arccos of dot product
+        axis = np.cross(v0_norm, north_pole)
+        angle = np.arccos(np.clip(np.dot(v0_norm, north_pole), -1.0, 1.0))
+
+        if np.linalg.norm(axis) < 1e-8:
+            rot = R.identity()
+        else:
+            axis = axis / np.linalg.norm(axis)
+            rot = R.from_rotvec(angle * axis)
+
+        rotated = rot.apply(cartesian)
+
+        x, y, z = rotated[:, 0], rotated[:, 1], rotated[:, 2]
+
+        ax = fig.add_subplot(nrows, ncols, i + 1, projection='3d')
+        ax.scatter(x, y, z, label=f'Run {i+1}', s=40, c='b')
+
+        # Draw a transparent unit sphere
+        u, v = np.mgrid[0:2 * np.pi:50j, 0:np.pi:25j]
+        xs = radius * np.cos(u) * np.sin(v)
+        ys = radius * np.sin(u) * np.sin(v)
+        zs = radius * np.cos(v)
+        ax.plot_surface(xs, ys, zs, color='gray', alpha=0.1, edgecolor='none')
+
+        ax.set_xlim([-1.2, 1.2])
+        ax.set_ylim([-1.2, 1.2])
+        ax.set_zlim([-1.2, 1.2])
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title(f'Run {i+1}')
+        ax.grid(True)
+
+    fig.suptitle(title + "\n", fontsize=16)
+    plt.tight_layout()
+    plt.show()
+    
+def gw_angles_graph(runs, title):
+    fig, axes = plt.subplots(2, 5, figsize=(20, 8))  # 2 rows, 5 columns
+    axes = axes.flatten()  # Flatten to 1D for easy indexing
+
+    for i, r in enumerate(runs):
+        adj_matrix = r["A"]
+        G = nx.from_numpy_array(adj_matrix)
+        pos = nx.circular_layout(G)
+
+        ax = axes[i]
+        nx.draw(
+            G, pos, ax=ax,
+            node_color='lightblue',
+            edge_color='gray',
+            node_size=500
+        )
+        ax.set_title(f"Graph {i+1}")
+
+    # Remove unused axes
+    for j in range(len(runs), len(axes)):
+        fig.delaxes(axes[j])
+
+    fig.suptitle(title + "\n", fontsize=16)
+    plt.tight_layout()
+    plt.show()
+
+def spherical_to_cartesian(angles, radius=1.0):
+    return np.array([
+        [
+            radius * np.sin(polar) * np.cos(azim),
+            radius * np.sin(polar) * np.sin(azim),
+            radius * np.cos(polar)
+        ]
+        for polar, azim in angles
+    ])
+
+def coplanar_points(run, tol=1e-2):
+    angles = run["GW3_angles"]
+    points = spherical_to_cartesian(angles)  # ✅ Convert to 3D
+    if points.shape[0] < 4:
+        print("YES")
+    else:
+        ref = points[0]
+        vecs = points[1:] - ref
+        rank = np.linalg.matrix_rank(vecs, tol=tol)
+        print("YES" if rank <= 2 else "NO")
+
+def coplanar_runs(runs, title):
+    print(title) 
+    for r in runs:
+        coplanar_points(r)
+
