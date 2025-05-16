@@ -702,3 +702,77 @@ def coplanar_runs(runs, title):
     for r in runs:
         coplanar_points(r)
 
+
+####LandScape Functions###
+def sample_landscape(precomp,params,mixer_ops=None,init=None,d=100):
+    data = np.zeros((d,d))
+    params = list(params)
+    for x,i in enumerate(np.linspace(0,2*np.pi,d)):
+        for y,j in enumerate(np.linspace(0,2*np.pi,d)):
+            data[x,y] = expval(precomp,QAOA_eval(precomp,params[:len(params)//2]+[i] + params[len(params)//2:]+[j],mixer_ops=mixer_ops,init=init))
+    return data
+def grad_ascent(x_init,grad_func,alpha,iters):
+    list = [np.array(x_init)]
+    for i in range(iters):
+        grad = grad_func(list[-1])
+        grad_comps = grad[[len(grad)//2-1,-1]]
+        list.append( np.clip(list[-1] + alpha * np.array(grad_comps),0,2*np.pi))
+    return list
+
+
+def grad_swarm(n_particles, precomp, params, mixer_ops=None, init=None,timesteps = 1000,alpha = 1e-3):
+    data_hist = [] 
+    cost_hist = []
+    params = list(params)
+    # Gradients and cost functions
+    grad = lambda x: QAOA_gradient_eval(precomp, params[:len(params)//2] + [x[0]] + params[len(params)//2:] + [x[1]], mixer_ops=mixer_ops, init=init)
+    cost = lambda x: expval(precomp, QAOA_eval(precomp, params[:len(params)//2] + [x[0]] + params[len(params)//2:] + [x[1]], mixer_ops=mixer_ops, init=init))
+
+    # Function to handle one particle
+    def process_particle(i):
+        x_init = np.random.random(2) * 2 * np.pi
+        data = grad_ascent(x_init, grad, alpha, timesteps)
+        print("COMPUTE")
+        cost_data = [cost(x) for x in data]
+        return data, cost_data
+
+    # Parallelizing the particle processing using joblib
+    results = Parallel(n_jobs=-1)(delayed(process_particle)(i) for i in range(n_particles))
+
+    # Extracting the results into the histories
+    for data, cost_data in results:
+        data_hist.append(data)
+        cost_hist.append(cost_data)
+        
+    return data_hist, cost_hist
+
+
+from scipy.ndimage import minimum_filter, maximum_filter
+
+def find_local_extrema(arr):
+    arr = arr[2:-2,2:-2]
+    # Define neighborhood footprint (3x3)
+    footprint = np.ones((3, 3), dtype=bool)
+
+    # Local minima: element is strictly smaller than all neighbors
+    local_min = (arr == minimum_filter(arr, footprint=footprint, mode='constant', cval=np.inf)) & \
+                (arr < maximum_filter(arr, footprint=footprint, mode='constant', cval=-np.inf))
+
+    # Local maxima: element is strictly larger than all neighbors
+    local_max = (arr == maximum_filter(arr, footprint=footprint, mode='constant', cval=-np.inf)) & \
+                (arr > minimum_filter(arr, footprint=footprint, mode='constant', cval=np.inf))
+
+    # Get the indices of the local minima and maxima
+    min_indices = np.argwhere(local_min)
+    max_indices = np.argwhere(local_max)
+
+    return min_indices, max_indices
+
+def nearest_max(data,max_list,d):
+    A = np.zeros((d,d))
+    for i in range(d):
+        for j in range(d):
+            l = [np.linalg.norm(np.array([i,j]) - m) for m in max_list]
+            A[i,j] = data[*max_list[np.argmin(l)]]
+    
+    return A
