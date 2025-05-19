@@ -334,14 +334,16 @@ def gamma_QAOA_state_derivative(idx,precomp,params,mixer_ops=None,init=None):
         psi = apply_mixer(psi,mixer(betas[i]))
     return psi
 
-def QAOA_gradient_eval(precomp,params,mixer_ops=None,init=None):
+def QAOA_gradient_eval(precomp,params,mixer_ops=None,init=None,indices =None):
+    if(indices is None):
+        indices =  list(range(len(params)//2))
     psi = QAOA_eval(precomp,params,mixer_ops=mixer_ops,init=init)
     grads = []
-    for i in range(len(params)//2):
+    for i in indices:
         dpsi = beta_QAOA_state_derivative(i,precomp,params,mixer_ops=mixer_ops,init=init)
         grads.append(2 * np.sum(dpsi.conjugate() * precomp * psi).real)
     
-    for i in range(len(params)//2):
+    for i in indices:
         dpsi = gamma_QAOA_state_derivative(i,precomp,params,mixer_ops=mixer_ops,init=init)
         grads.append(2 * np.sum(dpsi.conjugate() * precomp * psi).real)
         
@@ -688,7 +690,7 @@ def spherical_to_cartesian(angles, radius=1.0):
 
 def coplanar_points(run, tol=1e-2):
     angles = run["GW3_angles"]
-    points = spherical_to_cartesian(angles)  # ✅ Convert to 3D
+    points = spherical_to_cartesian(angles)  
     if points.shape[0] < 4:
         print("YES")
     else:
@@ -705,27 +707,56 @@ def coplanar_runs(runs, title):
 
 ####LandScape Functions###
 def sample_landscape(precomp,params,mixer_ops=None,init=None,d=100):
+    """
+    Uniformly sample the expectation value of a QAOA circuit while only varying the last two parameters (i.e. output is a 2d array)
+
+    Args:
+        precomp (np.ndarray): Precomputed diagonal Hamiltonian elements
+        params (list[Float64]): list of previously computed circuit values. These stay fixed
+        mixer_ops (list[np.ndarray], optional): mixer operators. Defaults to None.
+        init (np.ndarray, optional): initial statevector. Defaults to None.
+        d (int, optional): resolution of the sampling. Defaults to 100.
+
+    Returns:
+        np.ndarray: a 2d array of grid points corresponding to the sampled values
+    """
     data = np.zeros((d,d))
     params = list(params)
     for x,i in enumerate(np.linspace(0,2*np.pi,d)):
         for y,j in enumerate(np.linspace(0,2*np.pi,d)):
             data[x,y] = expval(precomp,QAOA_eval(precomp,params[:len(params)//2]+[i] + params[len(params)//2:]+[j],mixer_ops=mixer_ops,init=init))
     return data
+
+
 def grad_ascent(x_init,grad_func,alpha,iters):
+    """
+    Gradient ascent 
+
+    Args:
+        x_init (np.ndarray): initial parameters
+        grad_func (function): function to compute gradient 
+        alpha (Float64): step size
+        iters (int): number of iterations
+
+    Returns:
+        list[Float64]: cost history
+    """
     list = [np.array(x_init)]
     for i in range(iters):
         grad = grad_func(list[-1])
-        grad_comps = grad[[len(grad)//2-1,-1]]
-        list.append( np.clip(list[-1] + alpha * np.array(grad_comps),0,2*np.pi))
+        list.append( np.clip(list[-1] + alpha * np.array(grad),0,2*np.pi))
     return list
 
 
 def grad_swarm(n_particles, precomp, params, mixer_ops=None, init=None,timesteps = 1000,alpha = 1e-3):
+    """
+    Randomly initialize points and evolve them with gradient descent
+    """
     data_hist = [] 
     cost_hist = []
     params = list(params)
     # Gradients and cost functions
-    grad = lambda x: QAOA_gradient_eval(precomp, params[:len(params)//2] + [x[0]] + params[len(params)//2:] + [x[1]], mixer_ops=mixer_ops, init=init)
+    grad = lambda x: QAOA_gradient_eval(precomp, params[:len(params)//2] + [x[0]] + params[len(params)//2:] + [x[1]], mixer_ops=mixer_ops, init=init,indices=[len(params)//2])
     cost = lambda x: expval(precomp, QAOA_eval(precomp, params[:len(params)//2] + [x[0]] + params[len(params)//2:] + [x[1]], mixer_ops=mixer_ops, init=init))
 
     # Function to handle one particle
@@ -750,6 +781,15 @@ def grad_swarm(n_particles, precomp, params, mixer_ops=None, init=None,timesteps
 from scipy.ndimage import minimum_filter, maximum_filter
 
 def find_local_extrema(arr):
+    """
+    Given a cost landscape find the local maxima
+
+    Args:
+        arr (np.ndarray): 2D array with cost landscape
+
+    Returns:
+        tuple(np.ndarray,np.ndarray): coordinates of local minimum, local maximum
+    """
     arr = arr[2:-2,2:-2]
     # Define neighborhood footprint (3x3)
     footprint = np.ones((3, 3), dtype=bool)
@@ -763,12 +803,23 @@ def find_local_extrema(arr):
                 (arr > minimum_filter(arr, footprint=footprint, mode='constant', cval=np.inf))
 
     # Get the indices of the local minima and maxima
-    min_indices = np.argwhere(local_min)
-    max_indices = np.argwhere(local_max)
+    min_indices = np.argwhere(local_min) + 2
+    max_indices = np.argwhere(local_max) + 2
 
     return min_indices, max_indices
 
 def nearest_max(data,max_list,d):
+    """
+    Finf the local maximum closest to each point on a grid (cost landscape)
+
+    Args:
+        data (np.ndarray): cost landscape
+        max_list (np.ndarray): list of local maxima
+        d (int): resolution
+
+    Returns:
+        np.ndarray: new cost land scape with every value equal to the closest local maximum
+    """
     A = np.zeros((d,d))
     for i in range(d):
         for j in range(d):
